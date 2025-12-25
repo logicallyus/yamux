@@ -62,6 +62,10 @@ type Stream struct {
 	// closeTimer is set with stateLock held to honor the StreamCloseTimeout
 	// setting on Session.
 	closeTimer *time.Timer
+
+	// close channel to indicate stream has been closed
+	closeCh   chan struct{}
+	closeOnce sync.Once
 }
 
 // newStream is used to construct a new stream within
@@ -80,6 +84,7 @@ func newStream(session *Session, id uint32, state streamState) *Stream {
 		recvNotifyCh: make(chan struct{}, 1),
 		sendNotifyCh: make(chan struct{}, 1),
 		establishCh:  make(chan struct{}, 1),
+		closeCh:      make(chan struct{}),
 	}
 	s.readDeadline.Store(time.Time{})
 	s.writeDeadline.Store(time.Time{})
@@ -94,6 +99,10 @@ func (s *Stream) Session() *Session {
 // StreamID returns the ID of this stream
 func (s *Stream) StreamID() uint32 {
 	return s.id
+}
+
+func (s *Stream) CloseChan() <-chan struct{} {
+	return s.closeCh
 }
 
 // Read is used to read from the stream. It is safe to call Write, Read, and/or
@@ -384,7 +393,8 @@ SEND_CLOSE:
 	s.sendClose()
 	s.notifyWaiting()
 	if closeStream {
-		s.session.closeStream(s.id)
+		//s.session.closeStream(s.id)
+		s.notifyClose()
 	}
 	return nil
 }
@@ -396,7 +406,8 @@ func (s *Stream) closeTimeout() {
 	s.forceClose()
 
 	// Free the stream from the session map
-	s.session.closeStream(s.id)
+	//s.session.closeStream(s.id)
+	s.notifyClose()
 
 	// Send a RST so the remote side closes too.
 	s.sendLock.Lock()
@@ -404,6 +415,11 @@ func (s *Stream) closeTimeout() {
 	hdr := header(make([]byte, headerSize))
 	hdr.encode(typeWindowUpdate, flagRST, s.id, 0)
 	_ = s.session.sendNoWait(hdr)
+}
+
+func (s *Stream) notifyClose() {
+	s.session.closeStream(s.id)
+	s.closeOnce.Do(func() { close(s.closeCh) })
 }
 
 // forceClose is used for when the session is exiting
@@ -429,7 +445,8 @@ func (s *Stream) processFlags(flags uint16) error {
 				s.closeTimer.Stop()
 			}
 
-			s.session.closeStream(s.id)
+			//s.session.closeStream(s.id)
+			s.notifyClose()
 		}
 	}()
 
